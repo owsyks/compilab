@@ -289,6 +289,16 @@ export function Shell({
             )}
           </span>
         </footer>
+        {pathname !== "/tutor" && (
+          <Link
+            href="/tutor"
+            className="floating-tutor-pill"
+            title={t("Tuteur IA de Compilation", "AI Compilation Tutor")}
+          >
+            <MessagesSquare size={16} />
+            <span>{t("Tuteur IA", "AI Tutor")}</span>
+          </Link>
+        )}
       </div>
     </div>
   );

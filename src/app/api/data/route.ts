@@ -576,7 +576,7 @@ export async function POST(req: NextRequest) {
       );
     const a = actionSchema.parse(JSON.parse(raw));
     if (user.role === "GUEST" && ["chat", "generate", "aiGrade"].includes(a.op))
-      limited("guest-ai-global", 20);
+      limited("guest-ai-global", 60);
     const event = (type: string, topic: string) =>
       db.learningEvent
         .create({ data: { userId: user.id, type, topic } })
