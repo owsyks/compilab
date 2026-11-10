@@ -1,5 +1,5 @@
 import { notFound, redirect } from "next/navigation";
-import { visitor } from "@/lib/visitor";
+import { visitor, makeGuestUser } from "@/lib/visitor";
 import { Shell } from "@/components/shell";
 import { AppScreen } from "@/components/app-screen";
 const sections = [
@@ -36,25 +36,14 @@ export default async function Page({
   if (["practice", "exams"].includes(section) && rest.length > 1) notFound();
   if (!["lab", "learn", "practice", "exams"].includes(section) && rest.length)
     notFound();
-  const user = await visitor();
+  const user =
+    (await visitor()) ?? (section === "admin" ? null : makeGuestUser());
   if (!user) {
-    if (section === "admin") redirect("/login");
-    const query = new URLSearchParams();
-    for (const [key, value] of Object.entries(await searchParams)) {
-      if (typeof value === "string") query.set(key, value);
-    }
-    redirect(
-      "/api/guest?next=" +
-        encodeURIComponent(
-          "/" +
-            [section, ...rest].join("/") +
-            (query.size ? "?" + query.toString() : ""),
-        ),
-    );
+    redirect("/login");
   }
   if (section === "admin" && user.role !== "ADMIN") redirect("/dashboard");
   return (
-    <Shell name={user.name} role={user.role}>
+    <Shell name={user.name || "Visiteur"} role={user.role || "GUEST"}>
       <AppScreen
         key={section + "/" + rest.join("/")}
         section={section}

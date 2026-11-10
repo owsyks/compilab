@@ -203,9 +203,9 @@ export function Shell({
             </Link>
           )}
           <div className="user-card">
-            <span className="avatar">{name.slice(0, 2).toUpperCase()}</span>
+            <span className="avatar">{((name || "VI").slice(0, 2)).toUpperCase()}</span>
             <div>
-              <strong>{name}</strong>
+              <strong>{name || t("Visiteur", "Visitor")}</strong>
               <small>
                 {role === "GUEST"
                   ? t("Accès libre · cet appareil", "Open access · this device")

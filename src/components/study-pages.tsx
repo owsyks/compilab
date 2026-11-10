@@ -23,9 +23,10 @@ import { useUI } from "./providers";
 import { Badge, Empty, ErrorBox, PageTitle, ProgressBar } from "./ui";
 import { Logo, Controls } from "./shell";
 function metrics(data: Bootstrap) {
-  const scored = data.attempts.filter((a) => a.score !== null && a.submittedAt);
+  const attempts = data?.attempts ?? [];
+  const scored = attempts.filter((a) => a && a.score !== null && a.submittedAt);
   const byTopic = modules.map((m) => {
-    const items = scored.filter((a) => a.exercise.topic === m.id).slice(0, 10);
+    const items = scored.filter((a) => a.exercise?.topic === m.id).slice(0, 10);
     const total = items.reduce((s, _, i) => s + 1 / (i + 1), 0);
     return {
       id: m.id,
@@ -33,22 +34,25 @@ function metrics(data: Bootstrap) {
       titleEn: m.titleEn,
       count: items.length,
       score: items.length
-        ? items.reduce((s, a, i) => s + a.score! / (i + 1), 0) / total
+        ? items.reduce((s, a, i) => s + a.score! / (i + 1), 0) / (total || 1)
         : null,
     };
   });
-  const completed = data.progress.filter((p) => p.completed).length;
+  const completed = (data?.progress ?? []).filter((p) => p?.completed).length;
   return { scored, byTopic, completed };
 }
 export function Dashboard({ data }: { data: Bootstrap }) {
   const { t, preferences } = useUI();
   const { scored, byTopic, completed } = metrics(data);
+  const lessons = data?.lessons ?? [];
+  const progress = data?.progress ?? [];
+  const userName = data?.user?.name || "Étudiant";
   const next = modules
     .flatMap((m) => m.lessons.map((l) => ({ ...l, moduleId: m.id })))
     .find(
       (l) =>
-        data.lessons.some((p) => p.id === l.id) &&
-        !data.progress.some((p) => p.lessonId === l.id && p.completed),
+        lessons.some((p) => p.id === l.id) &&
+        !progress.some((p) => p.lessonId === l.id && p.completed),
     );
   const weak = byTopic
     .filter((m) => m.score !== null)
@@ -59,8 +63,8 @@ export function Dashboard({ data }: { data: Bootstrap }) {
       <PageTitle
         eyebrow={t("VOTRE ESPACE D’APPRENTISSAGE", "YOUR LEARNING WORKSPACE")}
         title={t(
-          `Bonjour, ${data.user.name.split(" ")[0]}.`,
-          `Hello, ${data.user.name.split(" ")[0]}.`,
+          `Bonjour, ${userName.split(" ")[0] || "Étudiant"}.`,
+          `Hello, ${userName.split(" ")[0] || "Student"}.`,
         )}
         description={t(
           "Un peu de méthode aujourd’hui. Un peu plus de clarté demain.",
