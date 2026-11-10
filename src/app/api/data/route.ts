@@ -535,7 +535,33 @@ export async function GET(req: NextRequest) {
         exams,
         bookmarks,
         events,
-        threads,
+        threads: threads.map((th) => ({
+          id: th.id,
+          title: th.title ?? "Conversation",
+          createdAt: th.createdAt ?? new Date().toISOString(),
+          messages: Array.isArray(th.messages)
+            ? th.messages.map((m: any) => ({
+                id: m.id,
+                role: m.role ?? "assistant",
+                content:
+                  typeof m.content === "string"
+                    ? m.content
+                    : String(m.content ?? ""),
+                citations: Array.isArray(m.citations)
+                  ? m.citations
+                  : typeof m.citations === "string"
+                    ? (() => {
+                        try {
+                          const p = JSON.parse(m.citations);
+                          return Array.isArray(p) ? p : [];
+                        } catch {
+                          return [];
+                        }
+                      })()
+                    : [],
+              }))
+            : [],
+        })),
         exercises: exercises.map(asPublic),
         providerConfigured: !!process.env.NVIDIA_API_KEY,
       },
@@ -1181,12 +1207,13 @@ export async function POST(req: NextRequest) {
         id: randomUUID(),
         role: "user",
         content: a.message,
+        citations: [],
       });
       existingThread.messages.push({
         id: randomUUID(),
         role: "assistant",
         content,
-        citations,
+        citations: Array.isArray(citations) ? citations : [],
       });
       globalFallback.fallbackThreads?.set(id, existingThread);
 
