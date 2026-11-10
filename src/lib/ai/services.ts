@@ -7,21 +7,88 @@ import {
   compareMembers,
 } from "@/lib/exercises";
 import { nimCompletion, TUTOR_RULES } from "./provider";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+
+let cachedLocalChunks: Array<{
+  sourceId: string;
+  title: string;
+  page: number;
+  verified: boolean;
+  text: string;
+}> | null = null;
+
+function getLocalChunks() {
+  if (cachedLocalChunks) return cachedLocalChunks;
+  try {
+    const filePath = join(
+      process.cwd(),
+      "content/sources/pages/study-transcript.json",
+    );
+    if (existsSync(filePath)) {
+      const raw = readFileSync(filePath, "utf8");
+      const pages = JSON.parse(raw) as Array<{ page: number; text: string }>;
+      cachedLocalChunks = [];
+      for (const p of pages) {
+        for (let i = 0; i < p.text.length; i += 1500) {
+          cachedLocalChunks.push({
+            sourceId: "study-transcript",
+            title: "Study Transcript · Compilation L3",
+            page: p.page,
+            verified: true,
+            text: p.text.slice(i, i + 1800),
+          });
+        }
+      }
+      return cachedLocalChunks;
+    }
+  } catch (err) {
+    console.warn("Could not load local source chunks:", err);
+  }
+  return [];
+}
+
 export async function retrieveSources(query: string) {
   const terms = [
     ...new Set(query.toLowerCase().match(/[a-zà-ÿ]{3,}/g) ?? []),
   ].slice(0, 8);
   if (!terms.length) return [];
-  const chunks = await db.sourceChunk.findMany({
-    where: {
-      OR: terms.map((term) => ({
-        text: { contains: term, mode: "insensitive" as const },
-      })),
-    },
-    include: { source: { select: { title: true } } },
-    take: 200,
-  });
-  return chunks
+  try {
+    const chunks = await db.sourceChunk.findMany({
+      where: {
+        OR: terms.map((term) => ({
+          text: { contains: term, mode: "insensitive" as const },
+        })),
+      },
+      include: { source: { select: { title: true } } },
+      take: 200,
+    });
+    if (chunks.length > 0) {
+      return chunks
+        .map((c) => ({
+          ...c,
+          rank: terms.reduce(
+            (n, t) => n + (c.text.toLowerCase().split(t).length - 1),
+            0,
+          ),
+        }))
+        .sort((a, b) => b.rank - a.rank)
+        .slice(0, 3)
+        .map((c) => ({
+          sourceId: c.sourceId,
+          title: c.source.title,
+          page: c.page,
+          verified: c.verified,
+          text: c.text.slice(0, 1600),
+        }));
+    }
+  } catch (err) {
+    console.warn("DB offline on retrieveSources, falling back to local files:", err);
+  }
+
+  const local = getLocalChunks();
+  if (!local.length) return [];
+  return local
     .map((c) => ({
       ...c,
       rank: terms.reduce(
@@ -29,16 +96,18 @@ export async function retrieveSources(query: string) {
         0,
       ),
     }))
+    .filter((c) => c.rank > 0)
     .sort((a, b) => b.rank - a.rank)
     .slice(0, 3)
     .map((c) => ({
       sourceId: c.sourceId,
-      title: c.source.title,
+      title: c.title,
       page: c.page,
       verified: c.verified,
       text: c.text.slice(0, 1600),
     }));
 }
+
 const generatedSchema = z.object({
   exercises: z
     .array(

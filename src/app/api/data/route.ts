@@ -32,6 +32,7 @@ const globalFallback = globalThis as unknown as {
   fallbackExams?: Map<string, any>;
   fallbackBookmarks?: Set<string>;
   fallbackProgress?: Set<string>;
+  fallbackThreads?: Map<string, any>;
 };
 if (!globalFallback.fallbackAttempts)
   globalFallback.fallbackAttempts = new Map();
@@ -40,6 +41,8 @@ if (!globalFallback.fallbackBookmarks)
   globalFallback.fallbackBookmarks = new Set();
 if (!globalFallback.fallbackProgress)
   globalFallback.fallbackProgress = new Set();
+if (!globalFallback.fallbackThreads)
+  globalFallback.fallbackThreads = new Map();
 
 function getBuiltInLessons() {
   return modules.flatMap((m) =>
@@ -485,6 +488,12 @@ export async function GET(req: NextRequest) {
         (e) => e.userId === user.id,
       );
     }
+    if (threads.length === 0 && globalFallback.fallbackThreads!.size > 0) {
+      threads = Array.from(globalFallback.fallbackThreads!.values()).filter(
+        (t) => t.userId === user.id,
+      );
+    }
+
 
     return NextResponse.json(
       {
@@ -971,9 +980,20 @@ export async function POST(req: NextRequest) {
         } catch (err) {
           console.warn("DB offline on thread lookup:", err);
         }
+        if (!thread) {
+          thread = globalFallback.fallbackThreads?.get(a.threadId);
+        }
+        if (!thread) {
+          thread = {
+            id: a.threadId,
+            userId: user.id,
+            title: a.message.slice(0, 40),
+            messages: [],
+          };
+          globalFallback.fallbackThreads?.set(a.threadId, thread);
+        }
       }
-      if (a.threadId && !thread)
-        throw new ProviderError("NOT_FOUND", "Conversation not found.", 404);
+
       const solver = a.grammar ? computeSets(parseGrammar(a.grammar)) : null;
       let content: string;
       let citations: Awaited<ReturnType<typeof retrieveSources>> = [];
@@ -1107,7 +1127,7 @@ export async function POST(req: NextRequest) {
       const id = thread?.id ?? randomUUID();
       try {
         await db.$transaction(async (tx) => {
-          if (!thread)
+          if (!thread || !thread.createdAt)
             await tx.tutorThread.create({
               data: { id, userId: user.id, title: a.message.slice(0, 100) },
             });
@@ -1133,7 +1153,28 @@ export async function POST(req: NextRequest) {
       } catch (err) {
         console.warn("DB offline on tutor thread save:", err);
       }
+
+      const existingThread = globalFallback.fallbackThreads?.get(id) ?? {
+        id,
+        userId: user.id,
+        title: a.message.slice(0, 100),
+        messages: [],
+      };
+      existingThread.messages.push({
+        id: randomUUID(),
+        role: "user",
+        content: a.message,
+      });
+      existingThread.messages.push({
+        id: randomUUID(),
+        role: "assistant",
+        content,
+        citations,
+      });
+      globalFallback.fallbackThreads?.set(id, existingThread);
+
       return NextResponse.json({ threadId: id, content, citations });
+
     }
 
     if (a.op === "deleteAccount") {
