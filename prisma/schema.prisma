@@ -1,0 +1,255 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id            String            @id
+  name          String
+  email         String            @unique
+  emailVerified Boolean           @default(false)
+  image         String?
+  role          String            @default("STUDENT")
+  preferences   Json              @default("{}")
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+  sessions      Session[]
+  accounts      Account[]
+  progress      LessonProgress[]
+  attempts      ExerciseAttempt[]
+  exams         ExamAttempt[]
+  threads       TutorThread[]
+  bookmarks     UserBookmark[]
+  events        LearningEvent[]
+  aiLogs        AiRequestLog[]
+  audits        AdminAuditEvent[]
+}
+
+model Session {
+  id        String   @id
+  expiresAt DateTime
+  token     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  ipAddress String?
+  userAgent String?
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Account {
+  id                    String    @id
+  accountId             String
+  providerId            String
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accessToken           String?
+  refreshToken          String?
+  idToken               String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+}
+
+model Module {
+  id          String   @id
+  title       String
+  titleEn     String
+  description String
+  position    Int      @unique
+  published   Boolean  @default(true)
+  lessons     Lesson[]
+}
+
+model Lesson {
+  id        String           @id
+  moduleId  String
+  module    Module           @relation(fields: [moduleId], references: [id], onDelete: Cascade)
+  slug      String
+  title     String
+  titleEn   String
+  duration  Int
+  position  Int
+  content   Json
+  published Boolean          @default(true)
+  updatedAt DateTime         @updatedAt
+  progress  LessonProgress[]
+
+  @@unique([moduleId, slug])
+}
+
+model LessonProgress {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lessonId  String
+  lesson    Lesson   @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  completed Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, lessonId])
+}
+
+model SourceDocument {
+  id        String        @id @default(cuid())
+  title     String
+  pageCount Int
+  kind      String        @default("unverified study conversation")
+  createdAt DateTime      @default(now())
+  chunks    SourceChunk[]
+}
+
+model SourceChunk {
+  id       String         @id @default(cuid())
+  sourceId String
+  source   SourceDocument @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  page     Int
+  position Int
+  text     String
+  topics   String[]
+  verified Boolean        @default(false)
+
+  @@unique([sourceId, page, position])
+  @@index([sourceId, page])
+}
+
+model Exercise {
+  id         String            @id
+  topic      String
+  type       String
+  difficulty Int
+  version    Int               @default(1)
+  published  Boolean           @default(true)
+  provenance String
+  body       Json
+  createdAt  DateTime          @default(now())
+  attempts   ExerciseAttempt[]
+
+  @@index([topic, difficulty, published])
+}
+
+model ExerciseAttempt {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  exerciseId  String
+  exercise    Exercise  @relation(fields: [exerciseId], references: [id])
+  status      String    @default("started")
+  answer      Json      @default("null")
+  feedback    Json?
+  score       Float?
+  hintLevel   Int       @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  submittedAt DateTime?
+
+  @@index([userId, status, createdAt])
+}
+
+model ExamAttempt {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String
+  minutes     Int
+  practice    Boolean   @default(false)
+  exerciseIds String[]
+  answers     Json      @default("{}")
+  feedback    Json?
+  score       Float?
+  status      String    @default("started")
+  createdAt   DateTime  @default(now())
+  submittedAt DateTime?
+
+  @@index([userId, createdAt])
+}
+
+model TutorThread {
+  id        String         @id @default(cuid())
+  userId    String
+  user      User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  createdAt DateTime       @default(now())
+  messages  TutorMessage[]
+
+  @@index([userId, createdAt])
+}
+
+model TutorMessage {
+  id        String      @id @default(cuid())
+  threadId  String
+  thread    TutorThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  role      String
+  content   String
+  citations Json        @default("[]")
+  createdAt DateTime    @default(now())
+
+  @@index([threadId, createdAt])
+}
+
+model UserBookmark {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lessonId  String
+  createdAt DateTime @default(now())
+
+  @@unique([userId, lessonId])
+}
+
+model LearningEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String
+  topic     String
+  detail    Json     @default("{}")
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model AiRequestLog {
+  id         String   @id @default(cuid())
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  operation  String
+  model      String
+  status     String
+  durationMs Int
+  createdAt  DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model AdminAuditEvent {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action    String
+  target    String
+  createdAt DateTime @default(now())
+}
