@@ -9,7 +9,7 @@ import { buildLR, parseLR } from "../src/lib/compiler/lr";
 
 describe("expanded lesson examples", () => {
   it("includes worked detail in every lesson in both languages", () => {
-    expect(allLessons).toHaveLength(15);
+    expect(allLessons).toHaveLength(26);
     for (const lesson of allLessons) {
       expect(lesson.content.sections.length).toBeGreaterThanOrEqual(3);
       expect(

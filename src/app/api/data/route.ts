@@ -94,6 +94,9 @@ const actionSchema = z.discriminatedUnion("op", [
       "",
       "introduction",
       "lexicale",
+      "tp-flex",
+      "tp-bison",
+      "td-oran",
       "grammaires",
       "preparation",
       "ll1",
@@ -472,11 +475,43 @@ export async function GET(req: NextRequest) {
       console.warn("DB offline during bootstrap, using built-in curriculum data:", err);
     }
 
+    const builtInLessons = getBuiltInLessons();
+    const builtInMap = new Map(builtInLessons.map((l) => [l.id, l]));
+
     if (lessons.length === 0) {
-      lessons = getBuiltInLessons();
+      lessons = builtInLessons;
+    } else {
+      const dbLessonIds = new Set(lessons.map((l) => l.id));
+      lessons = lessons.map((dbL) => {
+        const codeL = builtInMap.get(dbL.id);
+        return codeL
+          ? {
+              ...dbL,
+              title: codeL.title,
+              titleEn: codeL.titleEn,
+              duration: codeL.duration,
+              content: codeL.content,
+              moduleId: codeL.moduleId,
+            }
+          : dbL;
+      });
+      for (const b of builtInLessons) {
+        if (!dbLessonIds.has(b.id)) {
+          lessons.push(b);
+        }
+      }
     }
+
     if (exercises.length === 0) {
       exercises = getBuiltInExercises();
+    } else {
+      const builtInExercises = getBuiltInExercises();
+      const dbExerciseIds = new Set(exercises.map((e) => e.id));
+      for (const b of builtInExercises) {
+        if (!dbExerciseIds.has(b.id)) {
+          exercises.push(b);
+        }
+      }
     }
     if (progress.length === 0 && globalFallback.fallbackProgress!.size > 0) {
       progress = Array.from(globalFallback.fallbackProgress!).map((lessonId) => ({
