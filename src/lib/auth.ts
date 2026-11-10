@@ -5,7 +5,9 @@ import { APIError } from "better-auth/api";
 import { db } from "./db";
 export const auth = betterAuth({
   database: prismaAdapter(db, { provider: "postgresql", transaction: true }),
-  secret: process.env.AUTH_SECRET,
+  secret:
+    process.env.AUTH_SECRET ||
+    "compilab-auth-secret-for-build-minimum-32-chars-ok",
   baseURL: process.env.BETTER_AUTH_URL ?? "http://127.0.0.1:3000",
   emailAndPassword: {
     enabled: true,
