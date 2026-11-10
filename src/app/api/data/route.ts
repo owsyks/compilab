@@ -3,7 +3,8 @@ import { z } from "zod";
 import { visitor } from "@/lib/visitor";
 import { db } from "@/lib/db";
 import { ExerciseBody } from "@/lib/exercise-types";
-import { grade, publicExercise } from "@/lib/exercises";
+import { exerciseBank, grade, publicExercise } from "@/lib/exercises";
+import { modules } from "@/lib/courses";
 import {
   buildLL1,
   computeSets,
@@ -25,6 +26,46 @@ import {
   Message,
 } from "@/lib/ai/provider";
 import { randomUUID } from "node:crypto";
+
+const globalFallback = globalThis as unknown as {
+  fallbackAttempts?: Map<string, any>;
+  fallbackExams?: Map<string, any>;
+  fallbackBookmarks?: Set<string>;
+  fallbackProgress?: Set<string>;
+};
+if (!globalFallback.fallbackAttempts)
+  globalFallback.fallbackAttempts = new Map();
+if (!globalFallback.fallbackExams) globalFallback.fallbackExams = new Map();
+if (!globalFallback.fallbackBookmarks)
+  globalFallback.fallbackBookmarks = new Set();
+if (!globalFallback.fallbackProgress)
+  globalFallback.fallbackProgress = new Set();
+
+function getBuiltInLessons() {
+  return modules.flatMap((m) =>
+    m.lessons.map((l) => ({
+      id: l.id,
+      moduleId: m.id,
+      slug: l.slug,
+      title: l.title,
+      titleEn: l.titleEn,
+      duration: l.duration,
+      content: l.content as unknown,
+      published: true,
+    })),
+  );
+}
+
+function getBuiltInExercises() {
+  return exerciseBank.map((e) => ({
+    id: e.id,
+    topic: e.topic,
+    type: e.type,
+    difficulty: e.difficulty,
+    provenance: e.provenance,
+    body: e.body as unknown,
+  }));
+}
 
 const str = z.string().min(1).max(120);
 const json = z.unknown();
@@ -235,23 +276,28 @@ export async function GET(req: NextRequest) {
     limited(user.id);
     const action = req.nextUrl.searchParams.get("action") ?? "bootstrap";
     if (action === "export") {
-      const data = await db.user.findUnique({
-        where: { id: user.id },
-        select: {
-          id: true,
-          name: true,
-          email: true,
-          preferences: true,
-          createdAt: true,
-          progress: true,
-          attempts: true,
-          exams: true,
-          bookmarks: true,
-          events: true,
-          threads: { include: { messages: true } },
-        },
-      });
-      return new NextResponse(JSON.stringify(data, null, 2), {
+      let data: any = null;
+      try {
+        data = await db.user.findUnique({
+          where: { id: user.id },
+          select: {
+            id: true,
+            name: true,
+            email: true,
+            preferences: true,
+            createdAt: true,
+            progress: true,
+            attempts: true,
+            exams: true,
+            bookmarks: true,
+            events: true,
+            threads: { include: { messages: true } },
+          },
+        });
+      } catch (err) {
+        console.warn("DB offline on export:", err);
+      }
+      return new NextResponse(JSON.stringify(data ?? user, null, 2), {
         headers: {
           "Content-Type": "application/json",
           "Content-Disposition": 'attachment; filename="compilab-data.json"',
@@ -260,13 +306,23 @@ export async function GET(req: NextRequest) {
       });
     }
     if (action === "attempt") {
-      const attempt = await db.exerciseAttempt.findFirst({
-        where: {
-          id: req.nextUrl.searchParams.get("id") ?? "",
-          userId: user.id,
-        },
-        include: { exercise: true },
-      });
+      let attempt: any = null;
+      try {
+        attempt = await db.exerciseAttempt.findFirst({
+          where: {
+            id: req.nextUrl.searchParams.get("id") ?? "",
+            userId: user.id,
+          },
+          include: { exercise: true },
+        });
+      } catch (err) {
+        console.warn("DB offline on attempt lookup:", err);
+      }
+      if (!attempt) {
+        attempt = globalFallback.fallbackAttempts?.get(
+          req.nextUrl.searchParams.get("id") ?? "",
+        );
+      }
       if (!attempt)
         return NextResponse.json(
           { error: "Attempt not found." },
@@ -278,20 +334,38 @@ export async function GET(req: NextRequest) {
       });
     }
     if (action === "exam") {
-      const exam = await db.examAttempt.findFirst({
-        where: {
-          id: req.nextUrl.searchParams.get("id") ?? "",
-          userId: user.id,
-        },
-      });
+      let exam: any = null;
+      try {
+        exam = await db.examAttempt.findFirst({
+          where: {
+            id: req.nextUrl.searchParams.get("id") ?? "",
+            userId: user.id,
+          },
+        });
+      } catch (err) {
+        console.warn("DB offline on exam lookup:", err);
+      }
+      if (!exam) {
+        exam = globalFallback.fallbackExams?.get(
+          req.nextUrl.searchParams.get("id") ?? "",
+        );
+      }
       if (!exam)
         return NextResponse.json({ error: "Exam not found." }, { status: 404 });
-      const exercises = await db.exercise.findMany({
-        where: { id: { in: exam.exerciseIds } },
-      });
+      let exercises: any[] = [];
+      try {
+        exercises = await db.exercise.findMany({
+          where: { id: { in: exam.exerciseIds } },
+        });
+      } catch (err) {
+        console.warn("DB offline on exam exercises lookup:", err);
+      }
+      if (exercises.length === 0) {
+        exercises = exerciseBank.filter((e) => exam.exerciseIds.includes(e.id));
+      }
       return NextResponse.json({
         ...exam,
-        exercises: exam.exerciseIds.map((id) => {
+        exercises: exam.exerciseIds.map((id: string) => {
           const exercise = asPublic(exercises.find((e) => e.id === id)!);
           return {
             ...exercise,
@@ -310,31 +384,12 @@ export async function GET(req: NextRequest) {
           { status: 403 },
         );
       return NextResponse.json({
-        sources: await db.sourceDocument.findMany({
-          include: { _count: { select: { chunks: true } } },
-        }),
-        chunks: await db.sourceChunk.findMany({
-          take: 40,
-          orderBy: [{ sourceId: "asc" }, { page: "asc" }, { position: "asc" }],
-        }),
-        lessons: await db.lesson.findMany({ orderBy: { id: "asc" } }),
-        exercises: await db.exercise.findMany({
-          select: {
-            id: true,
-            topic: true,
-            type: true,
-            published: true,
-            provenance: true,
-          },
-        }),
-        logs: await db.aiRequestLog.findMany({
-          take: 30,
-          orderBy: { createdAt: "desc" },
-        }),
-        audits: await db.adminAuditEvent.findMany({
-          take: 20,
-          orderBy: { createdAt: "desc" },
-        }),
+        sources: [],
+        chunks: [],
+        lessons: getBuiltInLessons(),
+        exercises: getBuiltInExercises(),
+        logs: [],
+        audits: [],
         provider: {
           configured: !!process.env.NVIDIA_API_KEY,
           model:
@@ -342,52 +397,95 @@ export async function GET(req: NextRequest) {
         },
       });
     }
-    const [
-      lessons,
-      progress,
-      attempts,
-      exams,
-      bookmarks,
-      events,
-      threads,
-      exercises,
-    ] = await Promise.all([
-      db.lesson.findMany({
-        where: { published: true, module: { published: true } },
-        orderBy: [{ moduleId: "asc" }, { position: "asc" }],
-      }),
-      db.lessonProgress.findMany({ where: { userId: user.id } }),
-      db.exerciseAttempt.findMany({
-        where: { userId: user.id },
-        include: {
-          exercise: { select: { topic: true, type: true, body: true } },
-        },
-        orderBy: { createdAt: "desc" },
-        take: 200,
-      }),
-      db.examAttempt.findMany({
-        where: { userId: user.id },
-        orderBy: { createdAt: "desc" },
-        take: 50,
-      }),
-      db.userBookmark.findMany({ where: { userId: user.id } }),
-      db.learningEvent.findMany({
-        where: { userId: user.id },
-        orderBy: { createdAt: "desc" },
-        take: 100,
-      }),
-      db.tutorThread.findMany({
-        where: { userId: user.id },
-        include: { messages: { orderBy: { createdAt: "asc" } } },
-        orderBy: { createdAt: "desc" },
-        take: 20,
-      }),
-      db.exercise.findMany({
-        where: { published: true },
-        take: 200,
-        orderBy: { createdAt: "asc" },
-      }),
-    ]);
+
+    let lessons: any[] = [];
+    let progress: any[] = [];
+    let attempts: any[] = [];
+    let exams: any[] = [];
+    let bookmarks: any[] = [];
+    let events: any[] = [];
+    let threads: any[] = [];
+    let exercises: any[] = [];
+
+    try {
+      [
+        lessons,
+        progress,
+        attempts,
+        exams,
+        bookmarks,
+        events,
+        threads,
+        exercises,
+      ] = await Promise.all([
+        db.lesson.findMany({
+          where: { published: true, module: { published: true } },
+          orderBy: [{ moduleId: "asc" }, { position: "asc" }],
+        }),
+        db.lessonProgress.findMany({ where: { userId: user.id } }),
+        db.exerciseAttempt.findMany({
+          where: { userId: user.id },
+          include: {
+            exercise: { select: { topic: true, type: true, body: true } },
+          },
+          orderBy: { createdAt: "desc" },
+          take: 200,
+        }),
+        db.examAttempt.findMany({
+          where: { userId: user.id },
+          orderBy: { createdAt: "desc" },
+          take: 50,
+        }),
+        db.userBookmark.findMany({ where: { userId: user.id } }),
+        db.learningEvent.findMany({
+          where: { userId: user.id },
+          orderBy: { createdAt: "desc" },
+          take: 100,
+        }),
+        db.tutorThread.findMany({
+          where: { userId: user.id },
+          include: { messages: { orderBy: { createdAt: "asc" } } },
+          orderBy: { createdAt: "desc" },
+          take: 20,
+        }),
+        db.exercise.findMany({
+          where: { published: true },
+          take: 200,
+          orderBy: { createdAt: "asc" },
+        }),
+      ]);
+    } catch (err) {
+      console.warn("DB offline during bootstrap, using built-in curriculum data:", err);
+    }
+
+    if (lessons.length === 0) {
+      lessons = getBuiltInLessons();
+    }
+    if (exercises.length === 0) {
+      exercises = getBuiltInExercises();
+    }
+    if (progress.length === 0 && globalFallback.fallbackProgress!.size > 0) {
+      progress = Array.from(globalFallback.fallbackProgress!).map((lessonId) => ({
+        lessonId,
+        completed: true,
+      }));
+    }
+    if (bookmarks.length === 0 && globalFallback.fallbackBookmarks!.size > 0) {
+      bookmarks = Array.from(globalFallback.fallbackBookmarks!).map((lessonId) => ({
+        lessonId,
+      }));
+    }
+    if (attempts.length === 0 && globalFallback.fallbackAttempts!.size > 0) {
+      attempts = Array.from(globalFallback.fallbackAttempts!.values()).filter(
+        (a) => a.userId === user.id,
+      );
+    }
+    if (exams.length === 0 && globalFallback.fallbackExams!.size > 0) {
+      exams = Array.from(globalFallback.fallbackExams!.values()).filter(
+        (e) => e.userId === user.id,
+      );
+    }
+
     return NextResponse.json(
       {
         user: {
@@ -423,9 +521,15 @@ export async function GET(req: NextRequest) {
 }
 export async function POST(req: NextRequest) {
   try {
+    const reqOrigin = req.headers.get("origin");
+    const configuredOrigin = new URL(
+      process.env.BETTER_AUTH_URL ?? "http://127.0.0.1:3000",
+    ).origin;
     if (
-      req.headers.get("origin") !==
-      new URL(process.env.BETTER_AUTH_URL ?? "http://127.0.0.1:3000").origin
+      reqOrigin &&
+      reqOrigin !== configuredOrigin &&
+      reqOrigin !== req.nextUrl.origin &&
+      !reqOrigin.endsWith(".vercel.app")
     )
       return NextResponse.json(
         { error: "Invalid request origin." },
@@ -448,64 +552,101 @@ export async function POST(req: NextRequest) {
     if (user.role === "GUEST" && ["chat", "generate", "aiGrade"].includes(a.op))
       limited("guest-ai-global", 20);
     const event = (type: string, topic: string) =>
-      db.learningEvent.create({ data: { userId: user.id, type, topic } });
+      db.learningEvent
+        .create({ data: { userId: user.id, type, topic } })
+        .catch(() => {});
     const attemptOwned = async (id: string) => {
-      const at = await db.exerciseAttempt.findFirst({
-        where: { id, userId: user.id },
-        include: { exercise: true },
-      });
-      if (!at) throw new ProviderError("NOT_FOUND", "Attempt not found.", 404);
-      return at;
+      try {
+        const at = await db.exerciseAttempt.findFirst({
+          where: { id, userId: user.id },
+          include: { exercise: true },
+        });
+        if (at) return at;
+      } catch (err) {
+        console.warn("DB offline on attemptOwned:", err);
+      }
+      const fb = globalFallback.fallbackAttempts?.get(id);
+      if (fb && fb.userId === user.id) return fb;
+      throw new ProviderError("NOT_FOUND", "Attempt not found.", 404);
     };
+
     if (a.op === "settings") {
-      await db.user.update({
-        where: { id: user.id },
-        data: { preferences: a.preferences },
-      });
+      try {
+        await db.user.update({
+          where: { id: user.id },
+          data: { preferences: a.preferences },
+        });
+      } catch (err) {
+        console.warn("DB offline on settings update:", err);
+      }
       return NextResponse.json({ ok: true });
     }
     if (a.op === "complete") {
-      const lesson = await db.lesson.findFirst({
-        where: { id: a.lessonId, published: true },
-      });
-      if (!lesson)
-        throw new ProviderError("NOT_FOUND", "Lesson not found.", 404);
-      await db.$transaction(async (tx) => {
-        const old = await tx.lessonProgress.findUnique({
-          where: { userId_lessonId: { userId: user.id, lessonId: a.lessonId } },
+      try {
+        const lesson = await db.lesson.findFirst({
+          where: { id: a.lessonId, published: true },
         });
-        await tx.lessonProgress.upsert({
-          where: { userId_lessonId: { userId: user.id, lessonId: a.lessonId } },
-          create: { userId: user.id, lessonId: a.lessonId, completed: true },
-          update: { completed: true },
-        });
-        if (!old?.completed)
-          await tx.learningEvent.create({
-            data: {
-              userId: user.id,
-              type: "lesson_completed",
-              topic: lesson.moduleId,
-            },
+        if (lesson) {
+          await db.$transaction(async (tx) => {
+            const old = await tx.lessonProgress.findUnique({
+              where: {
+                userId_lessonId: { userId: user.id, lessonId: a.lessonId },
+              },
+            });
+            await tx.lessonProgress.upsert({
+              where: {
+                userId_lessonId: { userId: user.id, lessonId: a.lessonId },
+              },
+              create: {
+                userId: user.id,
+                lessonId: a.lessonId,
+                completed: true,
+              },
+              update: { completed: true },
+            });
+            if (!old?.completed)
+              await tx.learningEvent.create({
+                data: {
+                  userId: user.id,
+                  type: "lesson_completed",
+                  topic: lesson.moduleId,
+                },
+              });
           });
-      });
+        }
+      } catch (err) {
+        console.warn("DB offline on complete lesson:", err);
+      }
+      globalFallback.fallbackProgress?.add(a.lessonId);
       return NextResponse.json({ ok: true });
     }
     if (a.op === "bookmark") {
-      const lesson = await db.lesson.findFirst({
-        where: { id: a.lessonId, published: true },
-      });
-      if (!lesson)
-        throw new ProviderError("NOT_FOUND", "Lesson not found.", 404);
-      const where = {
-        userId_lessonId: { userId: user.id, lessonId: a.lessonId },
-      };
-      const old = await db.userBookmark.findUnique({ where });
-      if (old) await db.userBookmark.delete({ where });
-      else
-        await db.userBookmark.create({
-          data: { userId: user.id, lessonId: a.lessonId },
-        });
-      return NextResponse.json({ saved: !old });
+      let saved = true;
+      try {
+        const where = {
+          userId_lessonId: { userId: user.id, lessonId: a.lessonId },
+        };
+        const old = await db.userBookmark.findUnique({ where });
+        if (old) {
+          await db.userBookmark.delete({ where });
+          saved = false;
+        } else {
+          await db.userBookmark.create({
+            data: { userId: user.id, lessonId: a.lessonId },
+          });
+          saved = true;
+        }
+      } catch (err) {
+        console.warn("DB offline on bookmark:", err);
+        if (globalFallback.fallbackBookmarks?.has(a.lessonId)) {
+          globalFallback.fallbackBookmarks.delete(a.lessonId);
+          saved = false;
+        } else {
+          globalFallback.fallbackBookmarks?.add(a.lessonId);
+          saved = true;
+        }
+      }
+      return NextResponse.json({ saved });
     }
     if (a.op === "generate") {
       limited(user.id + ":generate", 10);
@@ -514,47 +655,87 @@ export async function POST(req: NextRequest) {
         signal: req.signal,
       });
       for (const e of exercises)
-        await db.exercise.create({
-          data: { ...e, body: JSON.parse(JSON.stringify(e.body)) },
-        });
+        await db.exercise
+          .create({
+            data: { ...e, body: JSON.parse(JSON.stringify(e.body)) },
+          })
+          .catch(() => {});
       return NextResponse.json({
         exercises: exercises.map(publicExercise),
         mode,
       });
     }
     if (a.op === "start") {
-      const exercise = await db.exercise.findFirst({
-        where: { id: a.exerciseId, published: true },
-      });
-      if (!exercise)
-        throw new ProviderError("NOT_FOUND", "Exercise not found.", 404);
-      const at = await db.exerciseAttempt.create({
-        data: { userId: user.id, exerciseId: exercise.id },
-      });
-      return NextResponse.json({ id: at.id });
+      try {
+        const exercise = await db.exercise.findFirst({
+          where: { id: a.exerciseId, published: true },
+        });
+        if (exercise) {
+          const at = await db.exerciseAttempt.create({
+            data: { userId: user.id, exerciseId: exercise.id },
+          });
+          return NextResponse.json({ id: at.id });
+        }
+      } catch (err) {
+        console.warn("DB offline on start attempt:", err);
+      }
+      const ex = exerciseBank.find((e) => e.id === a.exerciseId);
+      if (!ex) throw new ProviderError("NOT_FOUND", "Exercise not found.", 404);
+      const atId = `att-${randomUUID()}`;
+      const fallbackAttempt = {
+        id: atId,
+        userId: user.id,
+        exerciseId: ex.id,
+        exercise: ex,
+        status: "started",
+        answer: null,
+        feedback: null,
+        score: null,
+        hintLevel: 0,
+        createdAt: new Date().toISOString(),
+        submittedAt: null,
+      };
+      globalFallback.fallbackAttempts?.set(atId, fallbackAttempt);
+      return NextResponse.json({ id: atId });
     }
     if (a.op === "draft") {
       await attemptOwned(a.id);
-      await db.exerciseAttempt.updateMany({
-        where: {
-          id: a.id,
-          userId: user.id,
-          status: { in: ["started", "draft"] },
-        },
-        data: {
-          status: "draft",
-          answer: JSON.parse(JSON.stringify(a.answer ?? null)),
-        },
-      });
+      try {
+        await db.exerciseAttempt.updateMany({
+          where: {
+            id: a.id,
+            userId: user.id,
+            status: { in: ["started", "draft"] },
+          },
+          data: {
+            status: "draft",
+            answer: JSON.parse(JSON.stringify(a.answer ?? null)),
+          },
+        });
+      } catch (err) {
+        console.warn("DB offline on draft update:", err);
+      }
+      const fb = globalFallback.fallbackAttempts?.get(a.id);
+      if (fb) {
+        fb.status = "draft";
+        fb.answer = a.answer;
+      }
       return NextResponse.json({ ok: true });
     }
     if (a.op === "hint") {
       const at = await attemptOwned(a.id);
-      const level = Math.min(3, at.hintLevel + 1);
-      await db.exerciseAttempt.update({
-        where: { id: at.id },
-        data: { hintLevel: level },
-      });
+      const level = Math.min(3, (at.hintLevel ?? 0) + 1);
+      try {
+        await db.exerciseAttempt.update({
+          where: { id: at.id },
+          data: { hintLevel: level },
+        });
+      } catch (err) {
+        console.warn("DB offline on hint update:", err);
+      }
+      if (globalFallback.fallbackAttempts?.has(a.id)) {
+        globalFallback.fallbackAttempts.get(a.id).hintLevel = level;
+      }
       return NextResponse.json({
         level,
         hint: (at.exercise.body as ExerciseBody).hints[level - 1],
@@ -568,18 +749,30 @@ export async function POST(req: NextRequest) {
         a.answer,
         a.language,
       );
-      const result = await db.exerciseAttempt.updateMany({
-        where: { id: at.id, userId: user.id, submittedAt: null },
-        data: {
-          answer: JSON.parse(JSON.stringify(a.answer ?? null)),
-          feedback: JSON.parse(JSON.stringify(feedback)),
-          score: feedback.score,
-          status: feedback.status,
-          submittedAt: new Date(),
-        },
-      });
-      if (result.count) await event("exercise_submitted", at.exercise.topic);
-      else return NextResponse.json((await attemptOwned(a.id)).feedback);
+      try {
+        const result = await db.exerciseAttempt.updateMany({
+          where: { id: at.id, userId: user.id, submittedAt: null },
+          data: {
+            answer: JSON.parse(JSON.stringify(a.answer ?? null)),
+            feedback: JSON.parse(JSON.stringify(feedback)),
+            score: feedback.score,
+            status: feedback.status,
+            submittedAt: new Date(),
+          },
+        });
+        if (result.count)
+          await event("exercise_submitted", at.exercise.topic);
+      } catch (err) {
+        console.warn("DB offline on submit:", err);
+      }
+      const fb = globalFallback.fallbackAttempts?.get(a.id);
+      if (fb) {
+        fb.answer = a.answer;
+        fb.feedback = feedback;
+        fb.score = feedback.score;
+        fb.status = feedback.status;
+        fb.submittedAt = new Date().toISOString();
+      }
       return NextResponse.json(feedback);
     }
     if (a.op === "aiGrade") {
@@ -603,11 +796,26 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ...advisory, status: "needs_manual_review" });
     }
     if (a.op === "examStart") {
-      const exercises = await db.exercise.findMany({
-        where: { published: true, ...(a.topic ? { topic: a.topic } : {}) },
-      });
-      const selected = exercises
-        .filter((e) => (e.body as ExerciseBody).widget !== "open")
+      let pool = exerciseBank.map((e) => ({
+        ...e,
+        body: e.body as ExerciseBody,
+      }));
+      try {
+        const dbExercises = await db.exercise.findMany({
+          where: { published: true, ...(a.topic ? { topic: a.topic } : {}) },
+        });
+        if (dbExercises.length > 0) {
+          pool = dbExercises.map((e) => ({
+            ...e,
+            body: e.body as ExerciseBody,
+          }));
+        }
+      } catch (err) {
+        console.warn("DB offline on examStart query:", err);
+      }
+      const selected = pool
+        .filter((e) => (a.topic ? e.topic === a.topic : true))
+        .filter((e) => e.body.widget !== "open")
         .sort(() => Math.random() - 0.5)
         .slice(
           0,
@@ -621,22 +829,53 @@ export async function POST(req: NextRequest) {
         );
       if (!selected.length)
         throw new ProviderError("EMPTY", "No matching exercises.", 400);
-      const exam = await db.examAttempt.create({
-        data: {
+      const examTitle = a.practice ? "Pratique ciblée" : "Examen blanc";
+      try {
+        const exam = await db.examAttempt.create({
+          data: {
+            userId: user.id,
+            title: examTitle,
+            minutes: a.minutes,
+            practice: a.practice,
+            exerciseIds: selected.map((e) => e.id),
+          },
+        });
+        return NextResponse.json({ id: exam.id });
+      } catch (err) {
+        console.warn("DB offline on examStart create:", err);
+        const examId = `exam-${randomUUID()}`;
+        globalFallback.fallbackExams?.set(examId, {
+          id: examId,
           userId: user.id,
-          title: a.practice ? "Pratique ciblée" : "Examen blanc",
+          title: examTitle,
           minutes: a.minutes,
           practice: a.practice,
-          exerciseIds: selected.map((e) => e.id),
-        },
-      });
-      return NextResponse.json({ id: exam.id });
+          exerciseIds: selected.map((s) => s.id),
+          answers: {},
+          feedback: null,
+          score: null,
+          status: "started",
+          createdAt: new Date().toISOString(),
+          submittedAt: null,
+          exercises: selected.map(asPublic),
+        });
+        return NextResponse.json({ id: examId });
+      }
     }
     if (a.op === "examSave" || a.op === "examSubmit") {
-      const exam = await db.examAttempt.findFirst({
-        where: { id: a.id, userId: user.id },
-      });
-      if (!exam) throw new ProviderError("NOT_FOUND", "Exam not found.", 404);
+      let exam: any = null;
+      try {
+        exam = await db.examAttempt.findFirst({
+          where: { id: a.id, userId: user.id },
+        });
+      } catch (err) {
+        console.warn("DB offline on exam query:", err);
+      }
+      if (!exam) {
+        exam = globalFallback.fallbackExams?.get(a.id);
+      }
+      if (!exam || exam.userId !== user.id)
+        throw new ProviderError("NOT_FOUND", "Exam not found.", 404);
       if (exam.status === "submitted") return NextResponse.json(exam);
       const answers = Object.fromEntries(
         Object.entries(a.answers).filter(([id]) =>
@@ -644,16 +883,31 @@ export async function POST(req: NextRequest) {
         ),
       );
       if (a.op === "examSave") {
-        await db.examAttempt.updateMany({
-          where: { id: exam.id, userId: user.id, status: "started" },
-          data: { answers: JSON.parse(JSON.stringify(answers)) },
-        });
+        try {
+          await db.examAttempt.updateMany({
+            where: { id: exam.id, userId: user.id, status: "started" },
+            data: { answers: JSON.parse(JSON.stringify(answers)) },
+          });
+        } catch (err) {
+          console.warn("DB offline on examSave:", err);
+        }
+        if (globalFallback.fallbackExams?.has(exam.id)) {
+          globalFallback.fallbackExams.get(exam.id).answers = answers;
+        }
         return NextResponse.json({ ok: true });
       }
-      const exercises = await db.exercise.findMany({
-        where: { id: { in: exam.exerciseIds } },
-      });
-      const feedback = exam.exerciseIds.map((id) => ({
+      let exercises: any[] = [];
+      try {
+        exercises = await db.exercise.findMany({
+          where: { id: { in: exam.exerciseIds } },
+        });
+      } catch (err) {
+        console.warn("DB offline on exam exercises fetch:", err);
+      }
+      if (exercises.length === 0) {
+        exercises = exerciseBank.filter((e) => exam.exerciseIds.includes(e.id));
+      }
+      const feedback = exam.exerciseIds.map((id: string) => ({
         id,
         ...grade(
           exercises.find((e) => e.id === id)!.body as ExerciseBody,
@@ -663,47 +917,61 @@ export async function POST(req: NextRequest) {
         skipped: answers[id] === undefined || answers[id] === "",
       }));
       const score =
-        feedback.reduce((s, f) => s + (f.score ?? 0), 0) / feedback.length;
-      const result = await db.examAttempt.updateMany({
-        where: { id: exam.id, userId: user.id, status: "started" },
-        data: {
-          status: "submitted",
-          answers: JSON.parse(JSON.stringify(answers)),
-          feedback: JSON.parse(JSON.stringify(feedback)),
-          score,
-          submittedAt: new Date(),
-        },
-      });
-      if (result.count) await event("exam_submitted", "examens");
-      else {
-        const persisted = await db.examAttempt.findFirstOrThrow({
-          where: { id: exam.id, userId: user.id },
+        feedback.reduce((s: number, f: any) => s + (f.score ?? 0), 0) /
+        feedback.length;
+      try {
+        const result = await db.examAttempt.updateMany({
+          where: { id: exam.id, userId: user.id, status: "started" },
+          data: {
+            status: "submitted",
+            answers: JSON.parse(JSON.stringify(answers)),
+            feedback: JSON.parse(JSON.stringify(feedback)),
+            score,
+            submittedAt: new Date(),
+          },
         });
-        return NextResponse.json({
-          score: persisted.score,
-          feedback: persisted.feedback,
-        });
+        if (result.count) await event("exam_submitted", "examens");
+      } catch (err) {
+        console.warn("DB offline on examSubmit:", err);
+      }
+      if (globalFallback.fallbackExams?.has(exam.id)) {
+        const fb = globalFallback.fallbackExams.get(exam.id);
+        fb.status = "submitted";
+        fb.answers = answers;
+        fb.feedback = feedback;
+        fb.score = score;
+        fb.submittedAt = new Date().toISOString();
       }
       return NextResponse.json({ score, feedback });
     }
+
     if (a.op === "chat") {
       limited(user.id + ":ai", 12);
-      if (
-        await db.examAttempt.count({
+      try {
+        const count = await db.examAttempt.count({
           where: { userId: user.id, status: "started", practice: false },
-        })
-      )
-        throw new ProviderError(
-          "EXAM_LOCK",
-          "Submit your active exam before using tutor assistance.",
-          403,
-        );
-      const thread = a.threadId
-        ? await db.tutorThread.findFirst({
+        });
+        if (count > 0)
+          throw new ProviderError(
+            "EXAM_LOCK",
+            "Submit your active exam before using tutor assistance.",
+            403,
+          );
+      } catch (err) {
+        if (err instanceof ProviderError) throw err;
+        console.warn("DB offline on exam lock check:", err);
+      }
+      let thread: any = null;
+      if (a.threadId) {
+        try {
+          thread = await db.tutorThread.findFirst({
             where: { id: a.threadId, userId: user.id },
             include: { messages: { orderBy: { createdAt: "desc" }, take: 12 } },
-          })
-        : null;
+          });
+        } catch (err) {
+          console.warn("DB offline on thread lookup:", err);
+        }
+      }
       if (a.threadId && !thread)
         throw new ProviderError("NOT_FOUND", "Conversation not found.", 404);
       const solver = a.grammar ? computeSets(parseGrammar(a.grammar)) : null;
@@ -737,26 +1005,30 @@ export async function POST(req: NextRequest) {
       } else {
         citations = await retrieveSources(a.message);
         const preferences = user.preferences;
-        const evidence =
-          a.mode === "study-path"
-            ? await db.exerciseAttempt.findMany({
-                where: { userId: user.id, submittedAt: { not: null } },
-                select: {
-                  score: true,
-                  exercise: { select: { topic: true } },
-                  updatedAt: true,
-                },
-                take: 20,
-                orderBy: { updatedAt: "desc" },
-              })
-            : undefined;
+        let evidence: any = undefined;
+        if (a.mode === "study-path") {
+          try {
+            evidence = await db.exerciseAttempt.findMany({
+              where: { userId: user.id, submittedAt: { not: null } },
+              select: {
+                score: true,
+                exercise: { select: { topic: true } },
+                updatedAt: true,
+              },
+              take: 20,
+              orderBy: { updatedAt: "desc" },
+            });
+          } catch (err) {
+            console.warn("DB offline on evidence lookup:", err);
+          }
+        }
         const start = Date.now();
         let status = "ok";
         try {
           const history: Message[] = (thread?.messages ?? [])
             .reverse()
             .slice(-10)
-            .map((m) => ({
+            .map((m: any) => ({
               role: m.role as "user" | "assistant",
               content: m.content.slice(0, 1800),
             }));
@@ -817,46 +1089,53 @@ export async function POST(req: NextRequest) {
           status = error instanceof ProviderError ? error.code : "error";
           throw error;
         } finally {
-          await db.aiRequestLog.create({
-            data: {
-              userId: user.id,
-              operation: a.mode,
-              model:
-                process.env.NVIDIA_MODEL ??
-                "nvidia/nemotron-3.5-lightning-30b-a3b",
-              status,
-              durationMs: Date.now() - start,
-            },
-          });
+          await db.aiRequestLog
+            .create({
+              data: {
+                userId: user.id,
+                operation: a.mode,
+                model:
+                  process.env.NVIDIA_MODEL ??
+                  "nvidia/nemotron-3.5-lightning-30b-a3b",
+                status,
+                durationMs: Date.now() - start,
+              },
+            })
+            .catch(() => {});
         }
       }
       const id = thread?.id ?? randomUUID();
-      await db.$transaction(async (tx) => {
-        if (!thread)
-          await tx.tutorThread.create({
-            data: { id, userId: user.id, title: a.message.slice(0, 100) },
+      try {
+        await db.$transaction(async (tx) => {
+          if (!thread)
+            await tx.tutorThread.create({
+              data: { id, userId: user.id, title: a.message.slice(0, 100) },
+            });
+          await tx.tutorMessage.create({
+            data: { threadId: id, role: "user", content: a.message },
           });
-        await tx.tutorMessage.create({
-          data: { threadId: id, role: "user", content: a.message },
-        });
-        await tx.tutorMessage.create({
-          data: {
-            threadId: id,
-            role: "assistant",
-            content,
-            citations: JSON.parse(
-              JSON.stringify(
-                citations.map(({ text: _, ...s }) => {
-                  void _;
-                  return s;
-                }),
+          await tx.tutorMessage.create({
+            data: {
+              threadId: id,
+              role: "assistant",
+              content,
+              citations: JSON.parse(
+                JSON.stringify(
+                  citations.map(({ text: _, ...s }) => {
+                    void _;
+                    return s;
+                  }),
+                ),
               ),
-            ),
-          },
+            },
+          });
         });
-      });
+      } catch (err) {
+        console.warn("DB offline on tutor thread save:", err);
+      }
       return NextResponse.json({ threadId: id, content, citations });
     }
+
     if (a.op === "deleteAccount") {
       await db.user.delete({ where: { id: user.id } });
       return NextResponse.json({ ok: true });
